@@ -1,0 +1,42 @@
+{
+  "name": "call-swap",
+  "version": "1.0.0",
+  "main": "index.js",
+  "license": "MIT",
+  "scripts": {
+    "start": "ts-node  scripts/call-swap.ts",
+    "typechain": "typechain --out-dir src/config/abi/types --target=ethers-v5 \"src/config/abi/*.json\""
+  },
+  "peerDependencies": {
+    "@ethersproject/address": "^5.0.0",
+    "@ethersproject/contracts": "^5.0.0",
+    "@ethersproject/networks": "^5.0.0",
+    "@ethersproject/providers": "^5.0.0",
+    "@ethersproject/solidity": "^5.0.0"
+  },
+  "dependencies": {
+    "big.js": "^5.2.2",
+    "decimal.js-light": "^2.5.0",
+    "jsbi": "^3.1.4",
+    "lodash": "^4.17.21",
+    "tiny-invariant": "^1.1.0",
+    "tiny-warning": "^1.0.3",
+    "toformat": "^2.0.0",
+    "typescript": "^4.8.4"
+  },
+  "devDependencies": {
+    "@ethersproject/address": "^5.0.2",
+    "@ethersproject/contracts": "^5.0.2",
+    "@ethersproject/networks": "^5.0.2",
+    "@ethersproject/providers": "^5.0.5",
+    "@ethersproject/solidity": "^5.0.2",
+    "@typechain/ethers-v5": "^10.1.0",
+    "@types/big.js": "^4.0.5",
+    "@types/jest": "^24.0.25",
+    "@types/lodash": "^4.14.186",
+    "babel-plugin-transform-jsbi-to-bigint": "^1.3.1",
+    "ts-node": "^10.9.1",
+    "tsdx": "^0.12.3",
+    "typechain": "^8.1.0"
+  }
+}
