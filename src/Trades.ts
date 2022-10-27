@@ -1,11 +1,8 @@
-import {ChainId, Currency, Pair, Token,} from "../swapsdk";
-import { Interface, FunctionFragment } from '@ethersproject/abi'
-import flatMap from 'lodash/flatMap'
-import {wrappedCurrency} from "../src/wrappedCurrency";
+import {ChainId, Currency, Pair, Token} from "@swap/sdk";
+import {flatMap} from "lodash";
+import {wrappedCurrency} from "./utils/wrappedCurrency";
 import {BASES_TO_CHECK_TRADES_AGAINST,CUSTOM_BASES,ADDITIONAL_BASES} from "../src/constants";
-
-const chainId = ChainId.MAINNET
-
+import {getAllPairs} from "./Pairs";
 
 export enum PairState {
     LOADING,
@@ -15,49 +12,23 @@ export enum PairState {
 }
 
 
-//获取所有交易对地址
-export function getAllPairsAddress(currencyA?: Currency, currencyB?: Currency): string[] {
+//获取所有交易对
+export async function getAllCommonPairs(currencyA?: Currency, currencyB?: Currency): Promise<Pair[]> {
+    const chainId = ChainId.MAINNET
+
     const [tokenA, tokenB] = chainId
         ? [wrappedCurrency(currencyA, chainId), wrappedCurrency(currencyB, chainId)]
         : [undefined, undefined]
-    const bases:Token[] = basesTokens(tokenA,tokenB)
-    const basePairs: [Token, Token][] = baPairs(bases)
-    const allPairCombinations: [Token, Token][] = allPairCom(tokenA,tokenB,bases,basePairs)
-    return pairsAddress(allPairCombinations)
-}
 
+    const common = BASES_TO_CHECK_TRADES_AGAINST[ChainId.MAINNET] ?? []
+    const additionalA = tokenA ? ADDITIONAL_BASES[chainId]?.[tokenA.address] ?? [] : []
+    const additionalB = tokenB ? ADDITIONAL_BASES[chainId]?.[tokenB.address] ?? [] : []
 
-//构建交易对地址
-export function pairsAddress(currencies: [Currency | undefined, Currency | undefined][]): string[]  {
-    const tokens = currencies.map(([currencyA, currencyB]) => [
-        wrappedCurrency(currencyA, chainId),
-        wrappedCurrency(currencyB, chainId),])
-    const pairAddresses = tokens.map(([tokenA, tokenB]) => {
-        try {
-            return tokenA && tokenB && !tokenA.equals(tokenB) ? Pair.getAddress(tokenA, tokenB) : undefined
-        } catch (error: any) {
-            // Debug Invariant failed related to this line
-            console.error(
-                error.msg,
-                `- pairAddresses: ${tokenA?.address}-${tokenB?.address}`,
-                `chainId: ${tokenA?.chainId}`,
-            )
+    const bases:Token[] =  [...common, ...additionalA, ...additionalB]
 
-            return undefined
-        }
-    })
-    const pa: string[] = pairAddresses.map(iterm => {
-        if (iterm) {
-            return iterm
-        }
-    })
+    const basePairs: [Token, Token][] = flatMap(bases, (base): [Token, Token][] => bases.map((otherBase) => [base, otherBase]))
 
-    return pa
-}
-
-//构建所有交易对
-function allPairCom(tokenA: Token | undefined, tokenB: Token | undefined,bases:Token[],basePairs: [Token, Token][]): [Token, Token][] {
-    return  tokenA && tokenB
+    const allPairCombinations: [Token, Token][] = (tokenA && tokenB
         ? [
             // the direct pair
             [tokenA, tokenB],
@@ -67,7 +38,7 @@ function allPairCom(tokenA: Token | undefined, tokenB: Token | undefined,bases:T
             ...bases.map((base): [Token, Token] => [tokenB, base]),
             // each base against all bases
             ...basePairs,
-        ]
+        ]: basePairs)
             .filter((tokens): tokens is [Token, Token] => Boolean(tokens[0] && tokens[1]))
             .filter(([t0, t1]) => t0.address !== t1.address)
             .filter(([tokenA_, tokenB_]) => {
@@ -84,26 +55,16 @@ function allPairCom(tokenA: Token | undefined, tokenB: Token | undefined,bases:T
 
                 return true
             })
-        : []
+    const allPairs = await getAllPairs(allPairCombinations)
+
+    return  Object.values(
+        allPairs
+            // filter out invalid pairs
+            .filter((result): result is [PairState.EXISTS, Pair] => Boolean(result[0] === PairState.EXISTS && result[1]))
+            // filter out duplicated pairs
+            .reduce<{ [pairAddress: string]: Pair }>((memo, [, curr]) => {
+                memo[curr.liquidityToken.address] = memo[curr.liquidityToken.address] ?? curr
+                return memo
+            }, {}),
+    )
 }
-
-//构建基础交易对
-function baPairs(bases:Token[]):[Token, Token][]{
-    return flatMap(bases, (base): [undefined, Token][] => bases.map((otherBase) => [base, otherBase]))
-}
-
-//获取基础所有token
-function basesTokens(currencyA: Token | undefined, currencyB: Token | undefined):Token[]{
-    const chainId = ChainId.MAINNET
-
-    const [tokenA, tokenB] = chainId
-        ? [wrappedCurrency(currencyA, chainId), wrappedCurrency(currencyB, chainId)]
-        : [undefined, undefined]
-
-    const common = BASES_TO_CHECK_TRADES_AGAINST[ChainId.MAINNET] ?? []
-    const additionalA = tokenA ? ADDITIONAL_BASES[chainId]?.[tokenA.address] ?? [] : []
-    const additionalB = tokenB ? ADDITIONAL_BASES[chainId]?.[tokenB.address] ?? [] : []
-
-    return [...common, ...additionalA, ...additionalB]
-}
-

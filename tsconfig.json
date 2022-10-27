@@ -1,4 +1,6 @@
 {
+  "include": ["src", "swapsdk","scripts"],
+  "baseUrl": "src",
   "compilerOptions": {
     "target": "esnext",
     "module": "commonjs",
@@ -32,7 +34,7 @@
     "noImplicitReturns": true,
     "paths": {
       "*": ["src/*", "node_modules/*","./swapsdk/*","scripts"]
-    }
+    },
   },
 
 }

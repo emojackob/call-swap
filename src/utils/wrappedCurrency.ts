@@ -1,4 +1,4 @@
-import { ChainId, Currency, CurrencyAmount, HEC, Token, TokenAmount, WHEC } from '../swapsdk'
+import { ChainId, Currency, CurrencyAmount, HEC, Token, TokenAmount, WHEC } from '@swap/sdk'
 
 export function wrappedCurrency(currency: Currency | undefined, chainId: ChainId | undefined): Token | undefined {
   return chainId && currency === HEC ? WHEC[chainId] : currency instanceof Token ? currency : undefined

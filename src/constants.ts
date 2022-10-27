@@ -1,7 +1,7 @@
 
 // a list of tokens by chain
-import {ChainId, Token} from "index";
-import { mainnetTokens, testnetTokens } from '../src/tokens'
+import {ChainId, Token} from "@swap/sdk";
+import { mainnetTokens,} from '../src/tokens'
 
 type ChainTokenList = {
     readonly [chainId in ChainId]: Token[]
@@ -10,11 +10,11 @@ type ChainTokenList = {
 // used to construct intermediary pairs for trading
 export const BASES_TO_CHECK_TRADES_AGAINST: ChainTokenList = {
     [ChainId.MAINNET]: [
-        mainnetTokens.wbnb,
+        mainnetTokens.whec,
         mainnetTokens.hbtc,
         mainnetTokens.usdt,
     ],
-    [ChainId.TESTNET]: [testnetTokens.wbnb, testnetTokens.cake, testnetTokens.busd],
+    [ChainId.TESTNET]: [],
 }
 
 /**
