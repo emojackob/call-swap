@@ -19,17 +19,19 @@ import {erc20Contract, factoryContract, pairContract, routerContract} from "../s
 import {getCurrency, mainnetTokens} from "../src/tokens";
 import {calculateSlippageAmount, provider,calculateGasMargin} from "../src/utils";
 import {computeTradePriceBreakdown} from "../src/utils/prices"
-import {Erc20, IPancakeRouter02, PancakeFactory} from "config/abi/types";
+import {Erc20, IPancakePair, IPancakeRouter02, PancakeFactory} from "config/abi/types";
 import {getAllCommonPairs} from "../src/Trades";
 import {unwrappedToken, wrappedCurrency} from "../src/utils/wrappedCurrency";
 import {derivedMintInfo, Field} from "../src/mint";
 import {currentBlockTimestamp,getGasPrice} from "../src/chaininfo"
 import {BigNumber} from "@ethersproject/bignumber";
 import {TransactionResponse} from "@ethersproject/providers";
+import {derivedBurnInfo,Field as FieldBurn} from "../src/burn";
+import { splitSignature } from '@ethersproject/bytes'
+import {ApprovalState, approveCall} from "../src/approveCall";
+import addresses from "../src/config/constants/contracts";
+import {getPair} from "../src/Pairs";
 
-// import {getAllPairsAddress} from "../src/Trades";
-// import {getMultipleContractSingleData} from "../src/multicall/multicall";
-// import IPancakePairABI from '../src/config/abi/IPancakePair.json'
 
 const now = () => {
     return Date.parse(new Date().toString())+600
@@ -64,21 +66,61 @@ const main = async () => {
     const router = routerContract(account)
     const factory = factoryContract(account)
 
-    await routerAddLiquidityHEC("HEC",//币种A
+    const userExactInputTokenAmount = new TokenAmount(mainnetTokens.usdt,utils.parseEther("500").toString())
+    // 根据精确的token交换尽量多的token
+    await routerSwapExactTokensForTokens(
+        userExactInputTokenAmount,
+        mainnetTokens.hbtc,
+        mainnetTokens.usdt,
+        10,//用户输入的滑点百分比
+        account,
+        router,
+        600,//超时时间
+    )
+    return
+
+    //使用尽量少的token交换精确的token
+    const userOutTokenAmount = new TokenAmount(mainnetTokens.usdt,utils.parseEther("500").toString())
+    await routerSwapTokensForExactTokens(
+        userOutTokenAmount,
+        mainnetTokens.usdt,
+        mainnetTokens.hbtc,
+        10,
+        account,
+        router,600)
+    return
+
+    await routerAddLiquidityHEC(mainnetTokens.hbtc.address,//币种A
         mainnetTokens.usdt.address,//币种B
-        "1",//币种A对应数量
-        "900",//币种B对应数量
+        "10000",//币种A对应数量
+        "10000",//币种B对应数量
         account,//签名帐号
         router,//路由合约
         600,//10分钟
         5 //滑点
     )
     return
+
+    await routerRemoveLiquidity(
+        "HEC",
+        mainnetTokens.hbtc.address,
+        600,//10分钟超时
+        {independentField: FieldBurn.LIQUIDITY_PERCENT,typedValue: "10"}, //按照百分比(10%)计算移除 按流动LPtoken LIQUIDITY,按币种数量 CURRENCY_A,CURRENCY_B
+        account,
+            10//滑点 10%
+    )
+    return
+
+
+
+    //查询流动性
     await pairSelectLiquidity(account)
     return
 
     //使用尽量少的ETH交换精确的token
     const userInputOutTokenAmount = new TokenAmount(mainnetTokens.usdt,utils.parseEther("500").toString())
+
+    //使用尽量少的ETH交换精确的token
     await routerSwapETHForExactTokens(
         userInputOutTokenAmount,
         mainnetTokens.usdt,
@@ -299,30 +341,290 @@ export async function pairSelectLiquidity(owner: Wallet){
 }
 
 
-// 添加流动性 token
-export async function routerAddLiquidity() {
+// 移除流动性
+export async function routerRemoveLiquidity(
+    currencyIdA: string, //币种地址或者主币 HEC
+    currencyIdB: string,//币种地址或者主币 HEC
+    ttl: number,//用户输入交易截至时间
+    parameterFiledValue: {independentField: string,typedValue: string}, //计算移除流动性所需要的参数{
+    // independentField:枚举: LIQUIDITY,CURRENCY_A,CURRENCY_B,LIQUIDITY_PERCENT}
+    owner: Wallet,
+    userInputAllowedSlippage?: number //用户输入的滑点百分比
+) {
+    const [currencyA, currencyB] = [await getCurrency(currencyIdA) ?? undefined, await getCurrency(currencyIdB) ?? undefined]
+    const [tokenA,tokenB] = [wrappedCurrency(currencyA, 627), wrappedCurrency(currencyB, 627)]
+    const gasPrice = getGasPrice()
 
-}
+    const { pair, parsedAmounts, error} = await derivedBurnInfo(currencyA ?? undefined,
+        currencyB ?? undefined,parameterFiledValue,owner.address)
+   if (!!error) {
+       console.log("参数构造失败",error)
+       return
+   }
+
+    const blockTimestamp = await currentBlockTimestamp()
+    const deadline = (() => {
+        if (blockTimestamp && ttl) return blockTimestamp.add(ttl)
+        return undefined
+    })()
+    const allowedSlippage = userInputAllowedSlippage ?? 5
+    if (!pair){
+        return
+    }
+
+    const pairCon: IPancakePair | null = pairContract(pair.liquidityToken.address,owner)
+
+    //检查并授权流动性token给路由
+    const [approval, approve] = await approveCall(owner,parsedAmounts[FieldBurn.LIQUIDITY], addresses.router)
+    await approve()
+    async function onAttemptToApprove() {
+        if (!pairCon || !pair || !owner || !deadline) throw new Error('missing dependencies')
+        const liquidityAmount = parsedAmounts[FieldBurn.LIQUIDITY]
+        if (!liquidityAmount) {
+            throw new Error('没有流动性')
+        }
+
+        // try to gather a signature for permission
+        const nonce = await pairCon.nonces(owner.address)
+        console.log("nonce---->",nonce)
+        const domain = {
+            name: 'Pancake LPs',
+            version: '1',
+            chainId: 627,
+            verifyingContract: pair.liquidityToken.address,
+        }
+        const Permit = [
+            { name: 'owner', type: 'address' },
+            { name: 'spender', type: 'address' },
+            { name: 'value', type: 'uint256' },
+            { name: 'nonce', type: 'uint256' },
+            { name: 'deadline', type: 'uint256' },
+        ]
+        const message = {
+            owner: owner.address,
+            spender: addresses.router,
+            value: liquidityAmount.raw.toString(),
+            nonce: nonce.toHexString(),
+            deadline: deadline.toNumber(),
+        }
+        const sinHex = await owner._signTypedData(domain,{Permit},message)
+        const signature = splitSignature(sinHex)
+
+        return {v: signature.v,r: signature.r,s: signature.s,deadline: deadline.toNumber()}
+    }
+    const signatureData = await onAttemptToApprove()
+
+    async function onRemove() {
+        if (!owner || !deadline) throw new Error('missing dependencies')
+
+        const { [Field.CURRENCY_A]: currencyAmountA, [Field.CURRENCY_B]: currencyAmountB } = parsedAmounts
+        if (!currencyAmountA || !currencyAmountB) {
+            throw new Error('missing currency amounts')
+        }
+        const routerCon = routerContract(owner)
+
+        const amountsMin = {
+            [Field.CURRENCY_A]: calculateSlippageAmount(currencyAmountA, allowedSlippage)[0],
+            [Field.CURRENCY_B]: calculateSlippageAmount(currencyAmountB, allowedSlippage)[0],
+        }
+
+        if (!currencyA || !currencyB) {
+            throw new Error('missing tokens')
+        }
+
+        const liquidityAmount = parsedAmounts[FieldBurn.LIQUIDITY]
+        if (!liquidityAmount) {
+            throw new Error('missing liquidity amount')
+        }
+        const currencyBIsHEC = currencyB === HEC
+        const oneCurrencyIsHEC = currencyA === HEC || currencyBIsHEC
+        if (!tokenA || !tokenB) {
+            throw new Error('could not wrap')
+        }
 
 
-// 移除流动性 token
-export async function routerRemoveLiquidity() {
+        let estimate: (...args: any[]) => Promise<any>
+        let method: (...args: any[]) => Promise<TransactionResponse>
 
-}
+        let args: Array<string | string[] | number | boolean>
 
-// 移除流动性 主币
-export async function routerRemoveLiquidityHEC() {
+        //已经授权，正常移除流动性，少一步授权
+        if (approval === ApprovalState.APPROVED) {
+            // removeLiquidityETH
+            if (currencyBIsHEC) {
+                estimate = routerCon.estimateGas.removeLiquidityETH
+                method = routerCon.removeLiquidityETH
+                args = [
+                    currencyBIsHEC ? tokenA.address : tokenB.address,
+                    liquidityAmount.raw.toString(),
+                    amountsMin[currencyBIsHEC ? Field.CURRENCY_A : Field.CURRENCY_B].toString(),
+                    amountsMin[currencyBIsHEC ? Field.CURRENCY_B : Field.CURRENCY_A].toString(),
+                    owner.address,
+                    deadline.toHexString(),
+                ]
+            }
+            // removeLiquidity
+            else {
+                estimate = routerCon.estimateGas.removeLiquidity
+                method = routerCon.removeLiquidity
+                args = [
+                    tokenA.address,
+                    tokenB.address,
+                    liquidityAmount.raw.toString(),
+                    amountsMin[Field.CURRENCY_A].toString(),
+                    amountsMin[Field.CURRENCY_B].toString(),
+                    owner.address,
+                    deadline.toHexString(),
+                ]
+            }
+        }
+        //使用permit version 移除流动性
+        else  {
+            // removeLiquidityETHWithPermit
+            if (oneCurrencyIsHEC) {
+                estimate = routerCon.estimateGas.removeLiquidityETHWithPermit
+                method = routerCon.removeLiquidityETHWithPermit
+                args = [
+                    currencyBIsHEC ? tokenA.address : tokenB.address,
+                    liquidityAmount.raw.toString(),
+                    amountsMin[currencyBIsHEC ? Field.CURRENCY_A : Field.CURRENCY_B].toString(),
+                    amountsMin[currencyBIsHEC ? Field.CURRENCY_B : Field.CURRENCY_A].toString(),
+                    owner.address,
+                    signatureData.deadline,
+                    false,
+                    signatureData.v,
+                    signatureData.r,
+                    signatureData.s,
+                ]
+            }
+            // removeLiquidityETHWithPermit
+            else {
+                estimate = routerCon.estimateGas.removeLiquidityWithPermit
+                method = routerCon.removeLiquidityWithPermit
+                args = [
+                    tokenA.address,
+                    tokenB.address,
+                    liquidityAmount.raw.toString(),
+                    amountsMin[Field.CURRENCY_A].toString(),
+                    amountsMin[Field.CURRENCY_B].toString(),
+                    owner.address,
+                    signatureData.deadline,
+                    false,
+                    signatureData.v,
+                    signatureData.r,
+                    signatureData.s,
+                ]
+            }
+        }
+        await estimate(...args)
+            .then((estimatedGasLimit) =>
+                method(...args,{
+                    gasLimit: calculateGasMargin(estimatedGasLimit),
+                    gasPrice,
+                }).then((response: TransactionResponse) => {
+                    console.log("交易hash-->",response.hash,{
+                        summary: `Remove ${parsedAmounts[Field.CURRENCY_A]?.toSignificant(3)} ${
+                            currencyA?.symbol
+                        } and ${parsedAmounts[Field.CURRENCY_B]?.toSignificant(3)} ${currencyB?.symbol}`,
+                    })
+                }).catch((err: any) => {
+                        if (err && err.code !== 4001) {
+                            console.error(`Remove Liquidity failed 4001`, err, args)
+                        }
+                        console.log("交易失败",err)
+                    }).catch((e :any) => {
+                        console.log("交易失败",e)
+                }))
+    }
 
+    await onRemove()
 }
 
 // swapExactTokensForTokens 根据精确的token交换尽量多的token
-export async function routerSwapExactTokensForTokens() {
+export async function routerSwapExactTokensForTokens(
+    userInputTokenAmount: CurrencyAmount,
+    userOutputToken: Token,
+    userInputToken: Token,
+    userInputAllowedSlippage: number,//用户输入的滑点百分比
+    owner: Wallet,//地址帐号带签名
+    routerContract: IPancakeRouter02, //路由合约地址
+    ttl: number,//用户输入交易截至时间
+) {
+    //查询交易对是否存在
+    const [_,pair] = await getPair(userInputToken,userOutputToken)
+    if (!pair) {
+        console.log("交易对不存在")
+    }
+
+    const trade = Trade.bestTradeExactIn([pair!], userInputTokenAmount, userOutputToken, { maxHops: 1, maxNumResults: 1 })[0]
+    const { priceImpactWithoutFee, realizedLPFee } =  computeTradePriceBreakdown(trade)
+    const slippageTolerance = new Percent(JSBI.BigInt(userInputAllowedSlippage * 100), BIPS_BASE)
+    const miniAmount = trade.minimumAmountOut(slippageTolerance)
+    console.log("价格影响--->",priceImpactWithoutFee?.toFixed(2),"%")
+    console.log("手续费--->",realizedLPFee?.toSignificant(4),trade.inputAmount.currency.symbol)
+    console.log("最大输出数量--->",trade.outputAmount.toFixed(6),trade.outputAmount.currency.symbol)
+    console.log("最小获取数量--->",miniAmount.toFixed(6),trade.outputAmount.currency.symbol)
+    console.log("精确输入--->",trade.inputAmount.toFixed(6),trade.inputAmount.currency.symbol)
+
+    const blockTimestamp = await currentBlockTimestamp()
+    const deadline = (() => {
+        if (blockTimestamp && ttl) return blockTimestamp.add(ttl)
+        return undefined
+    })()
+
+    const result = await routerContract.swapExactTokensForTokens(
+        utils.hexValue(toHex(trade.inputAmount)),
+        utils.hexValue(toHex(trade.minimumAmountOut(slippageTolerance))),
+        [userInputToken.address,userOutputToken.address],
+        owner.address,deadline!.toHexString())
+
+    console.log("交易hash--->",result.hash)
+
+    await result.wait(1)
 
 }
 
 // swapTokensForExactTokens 使用尽量少的token交换精确的token
-export async function routerSwapTokensForExactTokens() {
+export async function routerSwapTokensForExactTokens(
+    userOutTokenAmount: CurrencyAmount,
+    userOutputToken: Token,
+    userInputToken: Token,
+    userInputAllowedSlippage: number,//用户输入的滑点百分比
+    owner: Wallet,//地址帐号带签名
+    routerContract: IPancakeRouter02, //路由合约地址
+    ttl: number,//用户输入交易截至时间
+) {
+    //查询交易对是否存在
+    const [_,pair] = await getPair(userOutputToken,userInputToken)
+    if (!pair) {
+        console.log("交易对不存在")
+    }
 
+    const trade =await Trade.bestTradeExactOut([pair!],userInputToken,userOutTokenAmount,{ maxHops: 1, maxNumResults: 1 })[0]
+    const { priceImpactWithoutFee, realizedLPFee } =  computeTradePriceBreakdown(trade)
+    const slippageTolerance = new Percent(JSBI.BigInt(userInputAllowedSlippage * 100), BIPS_BASE)
+    const minAmountIn = trade.inputAmount
+    const maxAmountIn = trade.maximumAmountIn(slippageTolerance)
+
+    console.log("价格影响--->",priceImpactWithoutFee?.toFixed(2),"%")
+    console.log("手续费--->",realizedLPFee?.toSignificant(4),trade.inputAmount.currency.symbol)
+    console.log("最小输入--->",minAmountIn.toFixed(6),trade.inputAmount.currency.symbol)
+    console.log("最大输入--->",maxAmountIn.toFixed(6),trade.inputAmount.currency.symbol)
+    console.log("精确输出-->",userOutTokenAmount.toFixed(6),userOutputToken.symbol)
+
+    const blockTimestamp = await currentBlockTimestamp()
+    const deadline = (() => {
+        if (blockTimestamp && ttl) return blockTimestamp.add(ttl)
+        return undefined
+    })()
+
+    const result = await routerContract.swapTokensForExactTokens(
+        toHex(trade.outputAmount),
+        toHex(maxAmountIn),
+        [userInputToken.address,userOutputToken.address],
+        owner.address,deadline!.toHexString())
+    console.log("交易hash---->",result.hash)
+    await result.wait(1)
 }
 
 // swapETHForExactTokens 使用尽量少的ETH交换精确的token
